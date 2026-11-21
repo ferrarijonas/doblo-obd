@@ -88,23 +88,24 @@ void aoFecharBt(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
   if (event == ESP_SPP_CLOSE_EVT || event == ESP_SPP_SRV_STOP_EVT) btCaiu = true;
 }
 
-bool conectarDongle() {
+void btIniciar() {
   BT.begin("DobloOBD", true);
   delay(1500);
   BT.setPin("1234", 4);
   BT.register_callback(aoFecharBt);
+}
+
+// Bloqueia at� o timeout da pilha. Quem chama deve soltar o watchdog antes.
+bool btConectar() {
   BTAddress alvo(MAC_DONGLE);
-  for (int i = 0; i < 2; i++) {
-    if (BT.connect(alvo)) { btCaiu = false; return true; }
-    delay(1200);
-  }
+  if (BT.connect(alvo)) { btCaiu = false; return true; }
   return false;
 }
 
 void reinitElm() {
   Serial.println("reinit ELM");
   if (!BT.connected()) {
-    if (conectarDongle()) Serial.println("  bt reconectado");
+    if (btConectar()) Serial.println("  bt reconectado");
     else return;
   }
   at("ATZ", 4000);
@@ -378,18 +379,18 @@ setTimeout(sincronizar,1500);
 // ---------------------------------------------------------------- rede
 
 void iniciarRede() {
-  WiFi.persistent(false);  // não grava credencial na flash a cada conexão
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.printf("AP %s  ip %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  // Só AP. Em AP+STA o ESP32 força o AP a seguir o canal da estação, e com a
+  // rede de casa fraca o AP trocava de canal e derrubava os clientes.
+  // A estação não é mais necessária: quem envia pro Drive é o celular.
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS, 1, 0, 4);  // canal 1 fixo, 4 clientes
+  Serial.printf("AP %s  ip %s  canal %d\n", AP_SSID, WiFi.softAPIP().toString().c_str(), WiFi.channel());
 
   WiFi.onEvent([](WiFiEvent_t ev, WiFiEventInfo_t info) {
-    if (ev == ARDUINO_EVENT_WIFI_STA_GOT_IP)
-      Serial.printf("wifi casa: %s rssi %d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    else if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
-      tTentativaWifi = millis();
+    if (ev == ARDUINO_EVENT_WIFI_AP_STACONNECTED) Serial.println("cliente wifi entrou");
+    else if (ev == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) Serial.println("cliente wifi saiu");
   });
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   // Portal cativo: qualquer nome resolve para a placa; qualquer rota
   // desconhecida cai no painel. É isso que faz o celular abrir sozinho.
@@ -421,12 +422,40 @@ void status() {
                 arquivo.c_str(), ciclos, semResposta,
                 (unsigned)(LittleFS.usedBytes() / 1024),
                 (unsigned)(LittleFS.totalBytes() / 1024),
-                BT.connected() ? 1 : 0, WiFi.status() == WL_CONNECTED ? 1 : 0);
+                BT.connected() ? 1 : 0, WiFi.softAPgetStationNum());
+}
+
+// Despeja um arquivo pela serial, para resgate sem rede.
+// Comando: x<NNNNN> <ext>   ex: x00025 csv
+void despejarArquivo(String arg) {
+  arg.trim();
+  int esp = arg.indexOf(' ');
+  String num = esp > 0 ? arg.substring(0, esp) : arg;
+  String ext = esp > 0 ? arg.substring(esp + 1) : "csv";
+  num.trim(); ext.trim();
+  String path = "/v" + num + "." + ext;
+  File f = LittleFS.open(path, FILE_READ);
+  if (!f) { Serial.printf("===ERRO %s===\n", path.c_str()); return; }
+  size_t tam = f.size();
+  Serial.printf("===FILE %s %u===\n", path.c_str(), (unsigned)tam);
+  uint8_t buf[256];
+  while (f.available()) {
+    size_t n = f.read(buf, sizeof(buf));
+    Serial.write(buf, n);
+    esp_task_wdt_reset();
+  }
+  f.close();
+  Serial.println("\n===END===");
 }
 
 void tratarSerial() {
   while (Serial.available()) {
     char c = Serial.read();
+    if (c == 'x' || c == 'X') {
+      String arg = Serial.readStringUntil('\n');
+      despejarArquivo(arg);
+      continue;
+    }
     if (c == 'd' || c == 'D') {
       if (gravando && csv) {
         csv.flush();
@@ -458,25 +487,25 @@ void setup() {
     case ESP_RST_BROWNOUT: nome = "brownout";  chave = "r_brownout"; break;
     default: break;
   }
+  prefs.begin("doblo", false);
   Serial.printf("\n== doblo logger + painel ==\nboot #%u por %s\n",
                 prefs.getUInt("boots", 0) + 1, nome);
+  prefs.putUInt("boots", prefs.getUInt("boots", 0) + 1);
+  prefs.putUInt(chave, prefs.getUInt(chave, 0) + 1);
 
   pinMode(PINO_BUZ, OUTPUT);
   digitalWrite(PINO_BUZ, LOW);
 
-  prefs.begin("doblo", false);
-  prefs.putUInt("boots", prefs.getUInt("boots", 0) + 1);
-  prefs.putUInt(chave, prefs.getUInt(chave, 0) + 1);
-
   esp_task_wdt_config_t cfg = { .timeout_ms = WDT_S * 1000, .idle_core_mask = 0, .trigger_panic = true };
-  esp_task_wdt_init(&cfg);
+  if (esp_task_wdt_init(&cfg) == ESP_ERR_INVALID_STATE) esp_task_wdt_reconfigure(&cfg);
 
   if (!LittleFS.begin(true)) Serial.println("LittleFS falhou");
 
   iniciarRede();  // AP primeiro: a rede tem que existir em ~1 s
 
   Serial.println("[1/6] bluetooth");
-  if (!conectarDongle()) {
+  btIniciar();
+  if (!btConectar()) {
     Serial.println("  FALHOU: dongle nao respondeu");
     Serial.println("  -> chave ligada? algum celular conectado nele?");
   } else {
@@ -507,18 +536,20 @@ void loop() {
   web.handleClient();
   tratarSerial();
 
-  // WiFi: reconecta devagar se o evento de queda não veio
-  if (WiFi.status() != WL_CONNECTED && millis() - tTentativaWifi > 30000) {
-    tTentativaWifi = millis();
-    WiFi.reconnect();
-  }
-
-  // Bluetooth: se o link caiu, tenta de novo a cada 15 s
-  if ((btCaiu || !BT.connected()) && millis() - tTentativaBt > 15000) {
-    tTentativaBt = millis();
-    esp_task_wdt_reset();
-    Serial.println("bt caiu; reconectando");
-    if (conectarDongle()) { btCaiu = false; reinitElm(); }
+  // Bluetooth: sem log gravando, tenta sempre (não há dado de qualquer jeito).
+  // Com log já aberto mas link perdido, tenta mais devagar — dado perdido é
+  // pior que um painel piscando. A espera maior cobre o rádio compartilhado.
+  {
+    bool precisa = !gravando ? !BT.connected() : (btCaiu || !BT.connected());
+    uint32_t espera = gravando ? 60000 : 30000;
+    if (precisa && millis() - tTentativaBt > espera) {
+      tTentativaBt = millis();
+      Serial.println("bt caiu; reconectando");
+      esp_task_wdt_delete(NULL);  // o connect pode bloquear além do timeout
+      bool ok = btConectar();
+      esp_task_wdt_add(NULL);
+      if (ok) reinitElm();
+    }
   }
 
   if (!gravando) { delay(200); return; }
