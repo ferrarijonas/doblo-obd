@@ -1,0 +1,8 @@
+# Layout revisto: WiFi + WebServer empurraram o firmware para 1,69 MB e o app
+# de 1,47 MB não coube (boot loop). App 2,31 MB / dados 1,56 MB.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x250000,
+spiffs,   data, spiffs,  0x260000, 0x190000,
+coredump, data, coredump,0x3F0000, 0x10000,

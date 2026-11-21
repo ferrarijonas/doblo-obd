@@ -1,0 +1,24 @@
+# --- segredos: NUNCA versionar ---
+firmware/wifi_secrets.h
+.clasprc.json
+*.token
+*.secret
+env/
+.env
+
+# --- dados do carro ---
+logs/
+*.csv
+!**/partitions.csv
+
+# --- artefatos de build ---
+__pycache__/
+*.pyc
+.pio/
+build/
+*.bin
+*.elf
+
+# --- lixo do Windows ---
+desktop.ini
+Thumbs.db

@@ -1,0 +1,8 @@
+# Partição otimizada para o logger do carro: app 1.47 MB + dados 2.55 MB.
+# Sem OTA (atualização é por cabo). nvs 20 KB.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x170000,
+spiffs,   data, spiffs,  0x180000, 0x270000,
+coredump, data, coredump,0x3F0000, 0x10000,
