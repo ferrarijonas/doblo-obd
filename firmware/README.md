@@ -1,14 +1,14 @@
 # Firmware ESP32 — logger do Doblò
 
 Placa: **ESP32-D0WD-V3 rev 3.1**, 4 MB, USB-UART CP2102 (COM10 no PC).
-Arduino core esp32 **3.2.1** (o arduino-cli vem embutido no Arduino IDE 2.x).
+Arduino core esp32 **3.2.1** (o `arduino-cli` vem embutido no Arduino IDE 2.x).
 
 ## Compilar e gravar
 
 ```bat
 "C:\Users\Alice\AppData\Local\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" ^
   compile --upload -p COM10 --fqbn esp32:esp32:esp32 ^
-  --board-options PartitionScheme=custom "C:\jonas\carro\firmware\esp32_link"
+  --board-options PartitionScheme=custom "C:\jonas\carro\firmware\esp32_logger"
 ```
 
 O `partitions.csv` da pasta do sketch define o layout:
@@ -16,75 +16,92 @@ O `partitions.csv` da pasta do sketch define o layout:
 ```
 nvs        20 KB
 otadata     8 KB
-app0     1472 KB
-spiffs   2496 KB   ← 2,5 MB próprios do projeto
+app0     2368 KB   (o WiFi + WebServer empurraram o firmware para 1,69 MB)
+spiffs   1600 KB   → ~26 h de log binário
 coredump   64 KB
 ```
 
-Conferido lendo a tabela de volta do chip (`esptool read-flash 0x8000 0xC00`).
 O "16 MB" que a compilação imprime é só o valor de fachada da opção *Custom*.
 
-## Achados do bring-up (18/11/2026)
+## Achados do bring-up
 
-- **Descobrir funciona**: `SerialBT.discover(12000)` lista os aparelhos.
-  O dongle aparece como `OBDII` / `01:23:45:67:89:BA`.
-- **RSSI importa**: -86 dBm (PC longe do carro) não conecta; -68 dBm (porta-luvas)
-  já é faixa utilizável para Bluetooth clássico.
-- **Pareamento**: o clone exige PIN `1234`. A API é
-  `SerialBT.setPin("1234", 4)` — a versão de um argumento não existe no core 3.2.1.
-- **`connect()` usa segurança por padrão**
-  (`ESP_SPP_SEC_ENCRYPT | ESP_SPP_SEC_AUTHENTICATE`), ou seja, sem pareamento
-  prévio a conexão falha mesmo com sinal bom. Alternativa a testar se o PIN não
-  bastar: `connect(addr, 0, ESP_SPP_SEC_NONE)`.
-- **Bug do core**: depois de `connect()` falhar repetidamente, o firmware pode dar
-  *stack smashing* e reiniciar. Limitar a 2 tentativas por boot.
-- **Anti-OTA**: a partição não tem segundo slot de app, então atualização é só por
-  cabo. É intencional — o carro não fica em rede de casa durante a noite.
-
-## Formato do CSV (contrato com o analisador)
-
-Uma linha por ciclo (~770 ms), 17 colunas. `-1` = nunca lido ainda.
-
-| coluna | PID | unidade | observação |
-|---|---|---|---|
-| `ms` | — | ms | desde o boot (sem RTC ainda) |
-| `rpm` | 010C | rpm | |
-| `vel` | 010D | km/h | |
-| `tps` | 0111 | % | borboleta comandada, não o pedal |
-| `carga` | 0104 | % | carga calculada |
-| `temp` | 0105 | °C | |
-| `ar` | 010F | °C | admissão |
-| `map` | 010B | kPa | |
-| `stft` | 0106 | **byte cru 0–255** | escala não confiável nesta central |
-| `ltft` | 0107 | **byte cru 0–255** | idem |
-| `avanc` | 010E | **byte cru 0–255** | idem |
-| `o2a` | 0114 | V | sonda antes do catalisador |
-| `o2b` | 0115 | V | depois do catalisador |
-| `fuel` | 0103 | 1/2 | 1 = malha aberta, 2 = fechada |
-| `mil` | 0101 | 0/1 | luz de injeção |
-| `dtc` | 0101 | nº | códigos gravados |
-| `falhas` | — | nº | leituras que falharam neste ciclo |
-
-Os três bytes crus ficam assim de propósito: já descobrimos uma vez que a
-decodificação padrão não vale para esta central, e byte cru é a única coisa que
-permite redecidir depois. O lado de arquivo guarda o resto em unidade final.
-
-Arquivos: `/v00001.csv`, `/v00002.csv`… (contador na NVS, sobrevive a reboot) e
-`/v00001.dtc` com a resposta crua do modo 03 do início da viagem.
+- **Descobrir funciona**: `SerialBT.discover(12000)` lista os aparelhos. O dongle
+  aparece como `OBDII` / `01:23:45:67:89:BA`.
+- **RSSI importa**: -86 dBm não conecta; -65 dBm (porta-luvas) conecta de primeira.
+- **Pareamento**: o clone exige PIN `1234` — `SerialBT.setPin("1234", 4)`
+  (a versão de um argumento não existe no core 3.2.1).
+- **`connect()` usa segurança por padrão** (`ESP_SPP_SEC_ENCRYPT |
+  ESP_SPP_SEC_AUTHENTICATE`), então sem pareamento a conexão falha mesmo com
+  sinal bom.
+- **Bug do core**: depois de `connect()` falhar repetidamente o firmware pode dar
+  *stack smashing*. Limitar a 2 tentativas por boot.
+- **Boot em ~18 s** até a primeira amostra: `ATZ` + `BUS INIT` da K-line.
+- **Abrir a porta serial reseta a placa** (auto-reset do devkit): cada leitura
+  pelo PC começa um arquivo novo.
+- **A partição sem OTA**: atualização é só por cabo. Intencional.
 
 ## Página no celular
 
-A placa tenta entrar no `Alice` por 6 s; se não conseguir, cria o AP `DobloOBD`.
-O IP aparece no boot pela serial (`wifi: <ip>` ou `AP ... ip <ip>`).
+O AP `DobloOBD` sobe **sempre**, antes do Bluetooth (~1 s). A estação de casa é
+tentada em paralelo, sem bloquear. Foi a correção do sintoma "entro no carro e a
+rede não aparece / na estrada aparece".
 
 | rota | o que é |
 |---|---|
 | `/` | painel: temperatura, rotação, MAP, mistura + faixa de alerta |
-| `/api` | JSON com todos os valores (é o que a página consome) |
-| `/log` | baixa o CSV da viagem atual |
+| `/api` | JSON com todos os valores (inclui URL e token do sync) |
+| `/log?f=` | baixa um arquivo (`.bin`) |
+| `/pendentes` | lista o que falta enviar |
+| `/marcar?f=` | grava o marcador `.ok` |
+| `/geo?lat&lon&alt` | grava `# geo` no log (vem do Atalho do iPhone) |
+| `/hora?ts=` | hora do celular |
 
-A página funciona sem internet: ela vive na flash da placa. No celular, "adicionar
-à tela inicial" vira um ícone.
+A página envia sozinha o que estiver pendente ao abrir, por formulário escondido
+(contorna o CORS do Apps Script), e mostra o contador.
+
+## Formato do log (binário, 20 bytes por amostra)
+
+Texto não cabia: o CSV dava **78,2 bytes/linha** = 6,6 h na partição. Binário fixo
+dá **20 bytes** = ~26 h, sem custo de performance.
+
+```
+offset  campo      tipo    escala
+0..3    ms         uint32  ms desde o boot
+4..5    rpm        uint16  x4  (0xFFFF = inválido)
+6       vel        uint8   km/h
+7       tps        uint8   %
+8       carga      uint8   %
+9       temp       uint8   °C + 40
+10      ar         uint8   °C + 40
+11      map        uint8   kPa
+12      stft       uint8   byte cru
+13      ltft       uint8   byte cru
+14      avanc      uint8   byte cru
+15      o2a        uint8   V x 200
+16      o2b        uint8   V x 200
+17      fuel       uint8   1/2
+18      mil|dtc    uint8   bit7 = MIL, 7 bits = contagem
+19      falhas     uint8   leituras que falharam no ciclo
+```
+
+Cabeçalho de 4 bytes `DBL1`, depois registros fixos. `0xFF` = valor inválido.
+
+Para ler: `python analise/bin2csv.py v00023.bin` — gera CSV com os mesmos nomes
+de coluna de antes.
+
+Os três bytes crus (stft, ltft, avanc) continuam crus de propósito: já
+descobrimos uma vez que a decodificação padrão não vale para esta central.
+
+Arquivos: `/v00001.bin`, `/v00002.bin`… (contador na NVS) e `/v00001.dtc` com a
+resposta crua do modo 03.
+
+## O que NÃO foi copiado dos projetos de referência
+
+- **Auto-ajuste de PID** (dropar PID que falha 3x): no nosso caso a falha é a ECU
+  dormindo, não PID inexistente — desativar seria permanente depois de um boot com
+  a chave no acessório.
+- **Scheduler por tela**: o painel é fixo; não há página escondida para priorizar.
+- **Tela touch**: o celular é a tela.
 
 ## Onde prender a placa
 

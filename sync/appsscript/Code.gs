@@ -24,7 +24,7 @@ function json(o) {
 }
 
 // Cria ou substitui: o Drive aceita dois arquivos com o mesmo nome, e uma
-// retentativa do mesmo bloco duplicaria o conte�do.
+// retentativa do mesmo bloco duplicaria o conte�do.
 function gravaOuAtualiza(pasta, nome, texto) {
   const it = pasta.getFilesByName(nome);
   if (it.hasNext()) {
@@ -63,10 +63,21 @@ function doPost(e) {
 
     const off = parseInt(p.off || '0', 10);
     const total = parseInt(p.total || '-1', 10);
+    const enc = String(p.enc || '');
     const corpo = (p.data !== undefined)
       ? String(p.data)
       : ((e.postData && e.postData.contents) ? e.postData.contents : '');
     if (off < 0 || !corpo.length) return json({ok: false, err: 'vazio'});
+
+    // Navegador manda o arquivo inteiro em base64 (o binário não passa como texto).
+    if (enc === 'b64') {
+      const bytes = Utilities.base64Decode(corpo);
+      const pasta = sub(VIAGENS, raiz());
+      const it = pasta.getFilesByName(trip);
+      if (it.hasNext()) it.next().setContent(bytes);
+      else pasta.createFile(Utilities.newBlob(bytes, 'application/octet-stream', trip));
+      return json({ok: true, off: bytes.length, recebido: bytes.length, total: bytes.length});
+    }
 
     // um bloco = um arquivo temporário, nomeado pelo offset
     const tmp = sub('_tmp', raiz());

@@ -5,12 +5,12 @@ O que já existe de verdade, o que falta, e como testar amanhã.
 ## Funciona
 
 - **ESP32 → dongle** por Bluetooth clássico (PIN `1234`), KWP fast na K-line.
-- **Coleta**: 17 colunas no LittleFS, ~1,2 s por ciclo, ~180 KB/h, ~13 h de
-  capacidade (partição de 1,56 MB após o app crescer).
+- **Coleta**: registros binários de 20 bytes, ~1,2 s por ciclo, ~60 KB/h, ~26 h de
+  capacidade (partição de 1,6 MB após o app crescer).
 - **Página no celular**: temperatura, rotação, MAP, mistura, faixa de alerta.
-  `/api` (JSON) e `/log` (baixa o CSV).
+  `/api` (JSON) e `/log` (baixa o `.bin`).
 - **Data sem RTC**: a página manda a hora do celular (`/hora?ts=`) e a placa
-  grava a marca `# hora <epoch> <ms>` dentro do CSV.
+  grava a marca `# hora <epoch> <ms>` dentro do log.
 - **Código de falha** cru do modo 03 salvo em `.dtc` (hoje: P1220).
 
 ## Não existe ainda
@@ -27,7 +27,7 @@ O que já existe de verdade, o que falta, e como testar amanhã.
 1. Placa no carro, USB de celular na tomada 12 V, chave ligada.
 2. Esperar ~30 s (boot + init da K-line).
 3. Celular na rede `DobloOBD` (senha em `firmware/wifi_secrets.h`), abrir `http://192.168.4.1`.
-4. `/log` baixa o CSV.
+4. `/log` baixa o `.bin`.
 
 Se a tomada 12 V continuar energizada com a chave desligada, **tirar o cabo** —
 o devkit consome ~50 mA e mata a bateria do carro em semanas.

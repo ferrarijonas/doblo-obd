@@ -107,15 +107,14 @@ void abrirCsv() {
   uint32_t boot = prefs.getUInt("boot", 0) + 1;
   prefs.putUInt("boot", boot);
   char nome[24];
-  snprintf(nome, sizeof(nome), "/v%05u.csv", boot);
+  snprintf(nome, sizeof(nome), "/v%05u.bin", boot);
   arquivo = nome;
   csv = LittleFS.open(arquivo, FILE_WRITE);
   if (!csv) {
     Serial.println("FALHOU ao abrir CSV");
     return;
   }
-  csv.println("# doblo logger v1; pids: 0C 0D 11 04 05 0F 0B 06 07 0E 14 15 03 01");
-  csv.println("# ms,rpm,vel,tps,carga,temp,ar,map,stft_raw,ltft_raw,avanc_raw,o2a,o2b,fuel,mil,dtc,falhas");
+  csv.write((const uint8_t *)"DBL1", 4);  // magic + versao
   csv.flush();
   gravando = true;
   Serial.printf("gravando em %s\n", arquivo.c_str());
@@ -124,7 +123,7 @@ void abrirCsv() {
 void gravarDtc() {
   String r = at("03", 4000);
   String path = arquivo;
-  path.replace(".csv", ".dtc");
+  path.replace(".bin", ".dtc");
   File f = LittleFS.open(path, FILE_WRITE);
   if (!f) return;
   f.println(r);
@@ -134,9 +133,28 @@ void gravarDtc() {
 
 void gravarLinha() {
   if (!gravando || !csv) return;
-  csv.printf("%lu,%.0f,%.0f,%.1f,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.2f,%.2f,%.0f,%d,%d,%d\n",
-             millis(), vRpm, vVel, vTps, vCarga, vTemp, vAr, vMap,
-             vStft, vLtft, vAvanc, vO2a, vO2b, vFuel, vMil, vDtc, falhasCiclo);
+  // Registro fixo de 20 bytes (documentado em firmware/README.md).
+  // 0xFF = valor inválido.
+  uint8_t b[20];
+  uint32_t ms = millis();
+  uint16_t rpm = (vRpm < 0) ? 0xFFFF : (uint16_t)(vRpm * 4);
+  b[0] = ms & 0xFF; b[1] = (ms >> 8) & 0xFF; b[2] = (ms >> 16) & 0xFF; b[3] = (ms >> 24) & 0xFF;
+  b[4] = rpm & 0xFF; b[5] = (rpm >> 8) & 0xFF;
+  b[6] = vVel < 0 ? 0xFF : (uint8_t)min(255.0f, vVel);
+  b[7] = vTps < 0 ? 0xFF : (uint8_t)min(100.0f, vTps);
+  b[8] = vCarga < 0 ? 0xFF : (uint8_t)min(100.0f, vCarga);
+  b[9] = vTemp < 0 ? 0xFF : (uint8_t)min(255.0f, vTemp + 40);
+  b[10] = vAr < 0 ? 0xFF : (uint8_t)min(255.0f, vAr + 40);
+  b[11] = vMap < 0 ? 0xFF : (uint8_t)min(255.0f, vMap);
+  b[12] = vStft < 0 ? 0xFF : (uint8_t)vStft;   // byte cru
+  b[13] = vLtft < 0 ? 0xFF : (uint8_t)vLtft;   // byte cru
+  b[14] = vAvanc < 0 ? 0xFF : (uint8_t)vAvanc; // byte cru
+  b[15] = vO2a < 0 ? 0xFF : (uint8_t)min(255.0f, vO2a * 200);
+  b[16] = vO2b < 0 ? 0xFF : (uint8_t)min(255.0f, vO2b * 200);
+  b[17] = vFuel < 0 ? 0xFF : (uint8_t)vFuel;
+  b[18] = (uint8_t)((vMil > 0 ? 0x80 : 0) | (vDtc > 0 ? min(127, vDtc) : 0));
+  b[19] = (uint8_t)min(255, falhasCiclo);
+  csv.write(b, sizeof(b));
   if (ciclos % 20 == 0) csv.flush();
 }
 
@@ -187,7 +205,7 @@ String listarPendentes() {
   while (f) {
     String n = f.name();
     if (n.startsWith("/")) n = n.substring(1);
-    if (n.endsWith(".csv")) {
+    if (n.endsWith(".bin") || n.endsWith(".csv")) {
       bool ok = enviado(n);
       total += ok ? 0 : f.size();
       if (!primeiro) j += ",";
@@ -239,7 +257,7 @@ void servirLog() {
   String nome = n;
   if (nome.startsWith("/")) nome = nome.substring(1);
   web.sendHeader("Content-Disposition", "attachment; filename=" + nome);
-  web.streamFile(f, "text/csv");
+  web.streamFile(f, "application/octet-stream");
   f.close();
 }
 
@@ -288,19 +306,24 @@ let S={}, ocupado=false;
 const q=new URLSearchParams(location.search);
 if(q.has('lat')) fetch('/geo?lat='+q.get('lat')+'&lon='+q.get('lon')+'&alt='+(q.get('alt')||0));
 fetch('/hora?ts='+Math.floor(Date.now()/1000));
-function enviar(f,txt){
+function enviar(f,dados,enc){
  return new Promise(res=>{
-  const fr=document.createElement('iframe');fr.name='ifr_'+f;fr.style.display='none';
+  const fr=document.createElement('iframe');fr.name='ifr_'+f.replace(/[^a-z0-9]/gi,'');fr.style.display='none';
   document.body.appendChild(fr);
   const fm=document.createElement('form');fm.method='POST';fm.target=fr.name;
-  fm.action=S.su+'?token='+encodeURIComponent(S.st)+'&trip='+encodeURIComponent(f)+'&off=0&total='+txt.length;
-  const ta=document.createElement('textarea');ta.name='data';ta.value=txt;
+  fm.action=S.su+'?token='+encodeURIComponent(S.st)+'&trip='+encodeURIComponent(f)+'&off=0&total='+dados.length+'&enc='+enc;
+  const ta=document.createElement('textarea');ta.name='data';ta.value=dados;
   fm.appendChild(ta);document.body.appendChild(fm);
   let feito=false;
   fr.onload=()=>{ if(!feito){feito=true;setTimeout(()=>{fm.remove();fr.remove();res(true)},200);} };
   fm.submit();
   setTimeout(()=>{ if(!feito){feito=true;fm.remove();fr.remove();res(false);} },25000);
  });
+}
+function b64(bytes){
+ const CH=0x8000; let s='';
+ for(let i=0;i<bytes.length;i+=CH) s+=String.fromCharCode.apply(null,bytes.subarray(i,i+CH));
+ return btoa(s);
 }
 async function sincronizar(){
  if(ocupado)return; ocupado=true;
@@ -310,8 +333,8 @@ async function sincronizar(){
   document.getElementById('pend').textContent=falta.length?falta.length+' viagem(ns) pendente(s) - '+Math.round(r.total_kb)+' KB':'nada pendente';
   for(const it of falta){
    document.getElementById('sst').textContent='enviando '+it.f+' ...';
-   const txt=await (await fetch('/log?f='+encodeURIComponent(it.f))).text();
-   const ok=await enviar(it.f,txt);
+   const buf=new Uint8Array(await (await fetch('/log?f='+encodeURIComponent(it.f))).arrayBuffer());
+   const ok=await enviar(it.f, b64(buf), 'b64');
    if(ok){ await fetch('/marcar?f='+encodeURIComponent(it.f)); document.getElementById('sst').textContent='enviado '+it.f; }
    else { document.getElementById('sst').textContent='falhou '+it.f+' (tenta de novo)'; break; }
   }
@@ -372,10 +395,9 @@ void despejarCsv() {
   csv.flush();
   File f = LittleFS.open(arquivo, FILE_READ);
   if (!f) { Serial.println("nao abriu"); return; }
-  Serial.printf("--- %s (%u bytes) ---\n", arquivo.c_str(), (unsigned)f.size());
-  while (f.available()) Serial.write(f.read());
+  unsigned tam = f.size();
   f.close();
-  Serial.println("--- fim ---");
+  Serial.printf("--- %s: %u bytes, %u amostras ---\n", arquivo.c_str(), tam, (tam - 4) / 20);
 }
 
 void status() {
@@ -407,20 +429,25 @@ void setup() {
 
   iniciarRede();  // AP primeiro: a rede tem que existir em ~1 s
 
+  Serial.println("[1/6] bluetooth");
   if (!conectarDongle()) {
-    Serial.println("dongle nao conectou; reinicie a chave");
+    Serial.println("  FALHOU: dongle nao respondeu");
+    Serial.println("  -> chave ligada? algum celular conectado nele?");
   } else {
-    Serial.println("dongle ok");
-    at("ATZ", 4000);
-    at("ATE0");
-    at("ATL0");
-    at("ATS0");
-    at("ATSP5", 1500);
+    Serial.println("  ok");
+    Serial.printf("[2/6] ATZ   : %s\n", at("ATZ", 4000).c_str());
+    Serial.println("[3/6] ATE0/ATL0/ATS0");
+    at("ATE0"); at("ATL0"); at("ATS0");
+    Serial.println("[4/6] ATSP5 (KWP fast)");
+    Serial.printf("  -> %s\n", at("ATSP5", 1500).c_str());
     uint8_t b[4];
-    if (lerPid("0100", b, 4, 8000)) Serial.println("PIDs ok");
+    Serial.println("[5/6] 0100 (bus init da K-line)");
+    if (lerPid("0100", b, 4, 8000)) Serial.println("  ok: ECU respondeu");
+    else Serial.println("  FALHOU: ECU muda (chave so no acessorio? central dormindo?)");
     abrirCsv();
     gravarDtc();
     lerMil();
+    Serial.println("[6/6] pronto");
   }
 }
 
