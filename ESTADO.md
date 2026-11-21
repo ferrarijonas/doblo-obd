@@ -1,49 +1,60 @@
-# Estado do projeto — 19/11/2026
+# Estado do projeto — 21/11/2026
 
-O que já existe de verdade, o que falta, e como testar amanhã.
+Retrato do que existe, do que foi medido e do que falta. Para não reconstruir
+contexto a cada sessão.
 
-## Funciona
+## Funciona (testado)
 
 - **ESP32 → dongle** por Bluetooth clássico (PIN `1234`), KWP fast na K-line.
-- **Coleta**: registros binários de 20 bytes, ~1,2 s por ciclo, ~60 KB/h, ~26 h de
-  capacidade (partição de 1,6 MB após o app crescer).
+- **Coleta binária**: 20 bytes por amostra, ~1,2 s por ciclo, ~60 KB/h, ~26 h na
+  partição de 1,6 MB.
 - **Página no celular**: temperatura, rotação, MAP, mistura, faixa de alerta.
-  `/api` (JSON) e `/log` (baixa o `.bin`).
-- **Data sem RTC**: a página manda a hora do celular (`/hora?ts=`) e a placa
-  grava a marca `# hora <epoch> <ms>` dentro do log.
-- **Código de falha** cru do modo 03 salvo em `.dtc` (hoje: P1220).
+- **Portal cativo**: entra na rede → o painel abre sozinho (iOS e Android).
+- **AP fixo**: canal 1, só AP (sem estação), 4 clientes. IP em ~2 s.
+- **Data sem RTC**: a página manda a hora do celular; a placa grava `# hora`.
+- **DTC** cru do modo 03 em `.dtc` (P1220 gravado na central).
+- **Upload para o Drive**: página → base64 → Apps Script → `Drive/doblo/viagens`.
+- **Resgate por serial**: comando `x<NNNNN> csv` despeja o arquivo cru.
 
-## Não existe ainda
+## Resgatado
 
-- **Upload para o Drive** — script pronto em `sync/appsscript/`, não publicado,
-  e o firmware não envia.
-- **Cartão SD** — tudo na flash interna (13 h).
-- **Buzzer** — alarme é só a faixa da página.
-- **RTC** — a hora depende do celular abrir a página.
-- **Instalação no carro** — hoje é protótipo com o notebook.
+35 viagens (`v00010`…`v00044`, ~396 KB) do firmware antigo, agora em
+`C:\padaria\doblo\viagens`. Vieram pela serial, não pela rede — ver "o que morde".
 
-## Como testar
+## Não existe
 
-1. Placa no carro, USB de celular na tomada 12 V, chave ligada.
-2. Esperar ~30 s (boot + init da K-line).
-3. Celular na rede `DobloOBD` (senha em `firmware/wifi_secrets.h`), abrir `http://192.168.4.1`.
-4. `/log` baixa o `.bin`.
+- **Cartão SD** (tudo na flash interna).
+- **Buzzer** (alarme é a faixa da página).
+- **RTC** (hora depende do celular abrir a página).
+- **GPS**: só via Atalho do iPhone (`?lat=&lon=`), nunca pelo navegador (HTTP).
+- **Analisador offline** (features, baseline, anomalias) — próximo passo.
+- **Instalação definitiva** no carro.
+
+## Como testar no carro
+
+1. Placa na tomada 12 V (USB), dongle no plugue, chave ligada.
+2. Esperar ~20 s: a serial mostra `[1/6] … [6/6] pronto`.
+3. Celular na rede `DobloOBD` → o portal abre o painel.
+4. Ao sair, o painel mostra as pendentes e envia sozinho.
 
 Se a tomada 12 V continuar energizada com a chave desligada, **tirar o cabo** —
-o devkit consome ~50 mA e mata a bateria do carro em semanas.
+~50 mA matam a bateria em semanas.
 
-## Detalhes que mordem
+## O que morde
 
-- Abrir a porta serial (COM10) **reseta a placa** — o devkit tem auto-reset.
-- O `flush` da flash trava a gravação ~3 s a cada 20 linhas (não perde dado).
-- `o2a = 1,27 V` é o marcador de "sonda fria/inválida", não mistura rica.
-- Trims e avanço vêm em **byte cru** de propósito: a escala padrão não vale
-  nesta central.
-- O sinal do WiFi de casa **não chega** no porta-luvas (~-70 dBm pela lataria),
-  então o AP próprio é o caminho normal dentro do carro.
+- **Abrir a serial (COM10) reseta a placa** (auto-reset do devkit).
+- **AP+STA quebra o AP**: o ESP32 força o AP a seguir o canal da estação. Por isso
+  não há mais estação; quem envia é o celular.
+- **Bluetooth e WiFi dividem o rádio**: enquanto alguém usa o painel, o BT espera.
+- **Rede instável derruba download em lote**: 35 arquivos por HTTP falharam; pela
+  serial passaram. Em emergência, usar `x`.
+- `o2a = 1,27 V` é "sonda fria/inválida", não mistura rica.
+- Trims e avanço são **byte cru** de propósito: a escala padrão não vale aqui.
+- O WiFi de casa não chega no porta-luvas (~-70 dBm pela lataria).
 
-## Próximos passos, em ordem
+## Próximos passos
 
-1. Publicar o Apps Script e implementar o envio (firmware + curl de teste).
-2. Analisador offline em Python lendo o CSV (features, baseline, anomalias).
-3. Ver a página funcionando de verdade numa viagem.
+1. **Analisador offline** em Python: `analise/bin2csv.py` já converte; falta
+   features, baseline e a saída de hipóteses.
+2. Regras de diagnóstico (`regras.json` + avaliador) — as ~50 da conversa.
+3. Testar o conjunto numa viagem real com o dongle em movimento.
