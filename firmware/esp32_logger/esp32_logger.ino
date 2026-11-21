@@ -1,35 +1,40 @@
-// Doblò — logger + painel + envio para o Drive pelo celular.
+// Doblò — logger + painel + sync.
 //
-// Serial: 'd' despeja o CSV atual, 's' status.
-// Web:  /            painel (envia pendentes sozinho ao abrir)
-//       /api         JSON
-//       /log?f=arq   baixa um arquivo
-//       /pendentes   lista o que falta enviar
-//       /marcar?f=   marca como enviado
-//       /geo?lat&lon&alt  grava a posição no CSV (vem do Atalho do iPhone)
-//       /hora?ts=    hora do celular
+// Estabilidade: watchdog, motivo do reset na NVS, reconexão de BT e WiFi com
+// backoff, TesterPresent no barramento, e portal cativo para o celular abrir o
+// painel sozinho ao entrar na rede.
+//
+// Serial: 'd' resumo do arquivo, 's' status.
 
 #include <BluetoothSerial.h>
+#include <DNSServer.h>
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <esp_task_wdt.h>
 #include "../wifi_secrets.h"
 
 BluetoothSerial BT;
 Preferences prefs;
 WebServer web(80);
+DNSServer dns;
 
 static const char *MAC_DONGLE = "01:23:45:67:89:BA";
 static const uint32_t CICLO_MS = 120;
 static const int PINO_BUZ = 25;
+static const uint32_t WDT_S = 40;
 
 unsigned long tUltimoCiclo = 0;
+unsigned long ultimaLeituraOk = 0;
+unsigned long tTentativaBt = 0;
+unsigned long tTentativaWifi = 0;
 unsigned long ciclos = 0;
 unsigned long semResposta = 0;
 String arquivo;
 File csv;
 bool gravando = false;
+volatile bool btCaiu = false;
 
 float vRpm = -1, vVel = -1, vTps = -1, vCarga = -1, vTemp = -1, vAr = -1, vMap = -1;
 float vStft = -1, vLtft = -1, vAvanc = -1, vO2a = -1, vO2b = -1, vFuel = -1;
@@ -75,16 +80,22 @@ bool lerPid(const char *req, uint8_t *buf, uint8_t n, uint32_t tmo = 1200) {
   String d = h.substring(p + 4);
   for (uint8_t i = 0; i < n; i++)
     buf[i] = (uint8_t)strtol(d.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+  ultimaLeituraOk = millis();
   return true;
+}
+
+void aoFecharBt(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
+  if (event == ESP_SPP_CLOSE_EVT || event == ESP_SPP_SRV_STOP_EVT) btCaiu = true;
 }
 
 bool conectarDongle() {
   BT.begin("DobloOBD", true);
   delay(1500);
   BT.setPin("1234", 4);
+  BT.register_callback(aoFecharBt);
   BTAddress alvo(MAC_DONGLE);
-  for (int i = 0; i < 3; i++) {
-    if (BT.connect(alvo)) return true;
+  for (int i = 0; i < 2; i++) {
+    if (BT.connect(alvo)) { btCaiu = false; return true; }
     delay(1200);
   }
   return false;
@@ -92,13 +103,16 @@ bool conectarDongle() {
 
 void reinitElm() {
   Serial.println("reinit ELM");
-  if (!BT.connected()) conectarDongle();
+  if (!BT.connected()) {
+    if (conectarDongle()) Serial.println("  bt reconectado");
+    else return;
+  }
   at("ATZ", 4000);
   at("ATE0"); at("ATL0"); at("ATS0");
   at("ATSP5", 1500);
   uint8_t b[4];
-  if (lerPid("0100", b, 4, 8000)) Serial.println("ELM recuperado");
-  else Serial.println("ELM ainda sem resposta");
+  if (lerPid("0100", b, 4, 8000)) Serial.println("  ELM recuperado");
+  else Serial.println("  ELM ainda sem resposta");
 }
 
 // ---------------------------------------------------------------- arquivo
@@ -110,11 +124,8 @@ void abrirCsv() {
   snprintf(nome, sizeof(nome), "/v%05u.bin", boot);
   arquivo = nome;
   csv = LittleFS.open(arquivo, FILE_WRITE);
-  if (!csv) {
-    Serial.println("FALHOU ao abrir CSV");
-    return;
-  }
-  csv.write((const uint8_t *)"DBL1", 4);  // magic + versao
+  if (!csv) { Serial.println("FALHOU ao abrir o log"); return; }
+  csv.write((const uint8_t *)"DBL1", 4);
   csv.flush();
   gravando = true;
   Serial.printf("gravando em %s\n", arquivo.c_str());
@@ -133,8 +144,6 @@ void gravarDtc() {
 
 void gravarLinha() {
   if (!gravando || !csv) return;
-  // Registro fixo de 20 bytes (documentado em firmware/README.md).
-  // 0xFF = valor inválido.
   uint8_t b[20];
   uint32_t ms = millis();
   uint16_t rpm = (vRpm < 0) ? 0xFFFF : (uint16_t)(vRpm * 4);
@@ -146,9 +155,9 @@ void gravarLinha() {
   b[9] = vTemp < 0 ? 0xFF : (uint8_t)min(255.0f, vTemp + 40);
   b[10] = vAr < 0 ? 0xFF : (uint8_t)min(255.0f, vAr + 40);
   b[11] = vMap < 0 ? 0xFF : (uint8_t)min(255.0f, vMap);
-  b[12] = vStft < 0 ? 0xFF : (uint8_t)vStft;   // byte cru
-  b[13] = vLtft < 0 ? 0xFF : (uint8_t)vLtft;   // byte cru
-  b[14] = vAvanc < 0 ? 0xFF : (uint8_t)vAvanc; // byte cru
+  b[12] = vStft < 0 ? 0xFF : (uint8_t)vStft;
+  b[13] = vLtft < 0 ? 0xFF : (uint8_t)vLtft;
+  b[14] = vAvanc < 0 ? 0xFF : (uint8_t)vAvanc;
   b[15] = vO2a < 0 ? 0xFF : (uint8_t)min(255.0f, vO2a * 200);
   b[16] = vO2b < 0 ? 0xFF : (uint8_t)min(255.0f, vO2b * 200);
   b[17] = vFuel < 0 ? 0xFF : (uint8_t)vFuel;
@@ -222,8 +231,7 @@ String listarPendentes() {
 void marcar() {
   String n = web.arg("f");
   if (!n.length()) { web.send(400, "text/plain", "falta f"); return; }
-  String ok = "/" + n + ".ok";
-  File f = LittleFS.open(ok, FILE_WRITE);
+  File f = LittleFS.open("/" + n + ".ok", FILE_WRITE);
   if (f) { f.print("1"); f.close(); }
   web.send(200, "application/json", "{\"ok\":true}");
 }
@@ -234,7 +242,9 @@ void geo() {
     float lon = web.arg("lon").toFloat();
     float alt = web.arg("alt").toFloat();
     if (lat != 0 || lon != 0) {
-      csv.printf("# geo %ld %.6f %.6f %.1f\n", epochBase + (long)(millis() / 1000), lat, lon, alt);
+      String l = "# geo " + String(epochBase + (long)(millis() / 1000)) + " " +
+                 String(lat, 6) + " " + String(lon, 6) + " " + String(alt, 1) + "\n";
+      csv.write((const uint8_t *)l.c_str(), l.length());
       csv.flush();
     }
   }
@@ -243,7 +253,11 @@ void geo() {
 
 void marcarHora(long ts) {
   epochBase = ts - (long)(millis() / 1000);
-  if (csv) { csv.printf("# hora %ld %lu\n", ts, millis()); csv.flush(); }
+  if (csv) {
+    String l = "# hora " + String(ts) + " " + String((unsigned long)millis()) + "\n";
+    csv.write((const uint8_t *)l.c_str(), l.length());
+    csv.flush();
+  }
   Serial.printf("hora sync: %ld\n", ts);
 }
 
@@ -287,7 +301,6 @@ static const char PAGINA[] PROGMEM = R"HTML(<!doctype html><html><head><meta cha
 .c span{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
 #det{color:var(--dim);font:13px ui-monospace,monospace;padding:0 14px 12px;line-height:1.7;white-space:pre-line}
 #sync{margin:0 10px 14px;background:#151b22;border-radius:14px;padding:12px;font-size:14px}
-#sync b{color:var(--fg)}
 button{background:#1f6feb;color:#fff;border:0;border-radius:10px;padding:9px 14px;font-size:14px}
 a{color:#5dade2}
 </style></head><body>
@@ -364,14 +377,23 @@ setTimeout(sincronizar,1500);
 
 // ---------------------------------------------------------------- rede
 
-bool staAvisado = false;
-
 void iniciarRede() {
-  // AP sobe SEMPRE e imediatamente; a estacao de casa tenta em paralelo.
+  WiFi.persistent(false);  // não grava credencial na flash a cada conexão
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS);
   Serial.printf("AP %s  ip %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+
+  WiFi.onEvent([](WiFiEvent_t ev, WiFiEventInfo_t info) {
+    if (ev == ARDUINO_EVENT_WIFI_STA_GOT_IP)
+      Serial.printf("wifi casa: %s rssi %d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    else if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+      tTentativaWifi = millis();
+  });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  // Portal cativo: qualquer nome resolve para a placa; qualquer rota
+  // desconhecida cai no painel. É isso que faz o celular abrir sozinho.
+  dns.start(53, "*", WiFi.softAPIP());
 
   web.on("/", HTTP_GET, []() { web.send_P(200, "text/html", PAGINA); });
   web.on("/api", HTTP_GET, []() { web.send(200, "application/json", jsonEstado()); });
@@ -384,33 +406,36 @@ void iniciarRede() {
     if (ts > 1700000000) marcarHora(ts);
     web.send(200, "application/json", "{}");
   });
+  web.onNotFound([]() {
+    web.sendHeader("Location", "http://192.168.4.1/", true);
+    web.send(302, "text/plain", "");
+  });
   web.begin();
-  Serial.println("http pronto");
+  Serial.println("http pronto (portal cativo ativo)");
 }
 
 // ---------------------------------------------------------------- serial
 
-void despejarCsv() {
-  if (!gravando) { Serial.println("sem arquivo"); return; }
-  csv.flush();
-  File f = LittleFS.open(arquivo, FILE_READ);
-  if (!f) { Serial.println("nao abriu"); return; }
-  unsigned tam = f.size();
-  f.close();
-  Serial.printf("--- %s: %u bytes, %u amostras ---\n", arquivo.c_str(), tam, (tam - 4) / 20);
-}
-
 void status() {
-  Serial.printf("arquivo %s | ciclos %lu | falhas %lu | fs %u/%u KB\n",
+  Serial.printf("arquivo %s | ciclos %lu | falhas %lu | fs %u/%u KB | bt %d | sta %d\n",
                 arquivo.c_str(), ciclos, semResposta,
                 (unsigned)(LittleFS.usedBytes() / 1024),
-                (unsigned)(LittleFS.totalBytes() / 1024));
+                (unsigned)(LittleFS.totalBytes() / 1024),
+                BT.connected() ? 1 : 0, WiFi.status() == WL_CONNECTED ? 1 : 0);
 }
 
 void tratarSerial() {
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == 'd' || c == 'D') despejarCsv();
+    if (c == 'd' || c == 'D') {
+      if (gravando && csv) {
+        csv.flush();
+        File f = LittleFS.open(arquivo, FILE_READ);
+        unsigned tam = f ? f.size() : 0;
+        if (f) f.close();
+        Serial.printf("--- %s: %u bytes, %u amostras ---\n", arquivo.c_str(), tam, (tam - 4) / 20);
+      } else Serial.println("sem arquivo");
+    }
     if (c == 's' || c == 'S') status();
   }
 }
@@ -420,11 +445,32 @@ void tratarSerial() {
 void setup() {
   Serial.begin(115200);
   delay(400);
-  Serial.println("\n== doblo logger + painel ==");
+
+  esp_reset_reason_t motivo = esp_reset_reason();
+  const char *nome = "desconhecido";
+  const char *chave = "r_outros";
+  switch (motivo) {
+    case ESP_RST_POWERON:  nome = "power-on";  chave = "r_poweron"; break;
+    case ESP_RST_SW:       nome = "software";  chave = "r_sw"; break;
+    case ESP_RST_PANIC:    nome = "panic";     chave = "r_panic"; break;
+    case ESP_RST_INT_WDT:  nome = "wdt int";   chave = "r_wdt"; break;
+    case ESP_RST_TASK_WDT: nome = "wdt task";  chave = "r_wdt"; break;
+    case ESP_RST_BROWNOUT: nome = "brownout";  chave = "r_brownout"; break;
+    default: break;
+  }
+  Serial.printf("\n== doblo logger + painel ==\nboot #%u por %s\n",
+                prefs.getUInt("boots", 0) + 1, nome);
+
   pinMode(PINO_BUZ, OUTPUT);
   digitalWrite(PINO_BUZ, LOW);
 
   prefs.begin("doblo", false);
+  prefs.putUInt("boots", prefs.getUInt("boots", 0) + 1);
+  prefs.putUInt(chave, prefs.getUInt(chave, 0) + 1);
+
+  esp_task_wdt_config_t cfg = { .timeout_ms = WDT_S * 1000, .idle_core_mask = 0, .trigger_panic = true };
+  esp_task_wdt_init(&cfg);
+
   if (!LittleFS.begin(true)) Serial.println("LittleFS falhou");
 
   iniciarRede();  // AP primeiro: a rede tem que existir em ~1 s
@@ -449,17 +495,32 @@ void setup() {
     lerMil();
     Serial.println("[6/6] pronto");
   }
+
+  esp_task_wdt_add(NULL);  // só depois do init: o setup pode passar de 40 s
 }
 
 // ---------------------------------------------------------------- loop
 
 void loop() {
-  tratarSerial();
+  esp_task_wdt_reset();
+  dns.processNextRequest();
   web.handleClient();
-  if (!staAvisado && WiFi.status() == WL_CONNECTED) {
-    staAvisado = true;
-    Serial.printf("wifi casa: %s rssi %d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  tratarSerial();
+
+  // WiFi: reconecta devagar se o evento de queda não veio
+  if (WiFi.status() != WL_CONNECTED && millis() - tTentativaWifi > 30000) {
+    tTentativaWifi = millis();
+    WiFi.reconnect();
   }
+
+  // Bluetooth: se o link caiu, tenta de novo a cada 15 s
+  if ((btCaiu || !BT.connected()) && millis() - tTentativaBt > 15000) {
+    tTentativaBt = millis();
+    esp_task_wdt_reset();
+    Serial.println("bt caiu; reconectando");
+    if (conectarDongle()) { btCaiu = false; reinitElm(); }
+  }
+
   if (!gravando) { delay(200); return; }
 
   if (millis() - tUltimoCiclo >= CICLO_MS) {
@@ -473,6 +534,9 @@ void loop() {
     if (falhasCiclo >= 5) falhasSeguidas++; else falhasSeguidas = 0;
     if (falhasSeguidas > 5) { reinitElm(); falhasSeguidas = 0; }
     falhasCiclo = 0;
+
+    // TesterPresent: mantém a ECU acordada se ficarmos parados
+    if (millis() - ultimaLeituraOk > 3000) at("3E00", 1000);
 
     if (ciclos % 5 == 0)
       Serial.printf("%5.0f rpm %3.0f km/h %4.1f C %3.0f kPa\n", vRpm, vVel, vTemp, vMap);

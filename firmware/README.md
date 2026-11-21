@@ -95,6 +95,21 @@ descobrimos uma vez que a decodificação padrão não vale para esta central.
 Arquivos: `/v00001.bin`, `/v00002.bin`… (contador na NVS) e `/v00001.dtc` com a
 resposta crua do modo 03.
 
+## Estabilidade
+
+| Recurso | Como |
+|---|---|
+| Task watchdog | 40 s, armado só depois do init (o boot passa de 20 s) |
+| Motivo do reset | `esp_reset_reason()` no boot + contadores por tipo na NVS (`boots`, `r_panic`, `r_wdt`, `r_brownout`…) |
+| Reconexão Bluetooth | callback de `ESP_SPP_CLOSE_EVT` + nova tentativa a cada 15 s, seguida de `reinitElm()` |
+| Reconexão WiFi | `onEvent` + `reconnect()` a cada 30 s se o evento não vier; `persistent(false)` para não gastar flash |
+| ECU dormindo | `3E 00` (TesterPresent) quando passa 3 s sem leitura bem-sucedida |
+| Portal cativo | DNS responde tudo com o IP do AP e rota desconhecida devolve 302 para `/` — iOS e Android abrem o painel sozinhos |
+
+O portal é o que resolve o "rede sem internet": o telefone mostra a folha de
+"entrar na rede" já com o painel dentro. Não substitui o Atalho para GPS — a
+localização continua bloqueada em `http://`.
+
 ## O que NÃO foi copiado dos projetos de referência
 
 - **Auto-ajuste de PID** (dropar PID que falha 3x): no nosso caso a falha é a ECU
