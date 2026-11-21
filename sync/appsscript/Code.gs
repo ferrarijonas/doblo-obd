@@ -9,7 +9,12 @@
  * Resposta: {"ok":true,"off":<próximo byte>,"recebido":n,"total":n}
  */
 
-const TOKEN = 'doblo-7f3c9a1e5b2d4f80';
+// Lido na hora da chamada: no Apps Script os arquivos rodam em ordem, e um
+// const no topo pegaria SEGREDO antes de segredo.gs ser avaliado.
+function tokenOk(t) {
+  const esperado = (typeof SEGREDO !== 'undefined') ? SEGREDO : 'TROQUE_ESTE_TOKEN';
+  return t === esperado;
+}
 const RAIZ = 'doblo';        // pasta no Drive
 const VIAGENS = 'viagens';   // subpasta com os arquivos finais
 
@@ -49,7 +54,7 @@ function doPost(e) {
 
   try {
     const p = e.parameter || {};
-    if (p.token !== TOKEN) return json({ok: false, err: 'token'});
+    if (!tokenOk(p.token)) return json({ok: false, err: 'token'});
 
     const trip = String(p.trip || '');
     if (!/^(v[0-9]{5}|[0-9]{8}-[0-9]{6})\.(csv|bin)$/.test(trip)) {

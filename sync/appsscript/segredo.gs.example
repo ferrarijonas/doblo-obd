@@ -1,0 +1,2 @@
+// Copie para segredo.gs e ponha o mesmo token do firmware/wifi_secrets.h
+var SEGREDO = 'TROQUE_ESTE_TOKEN';
