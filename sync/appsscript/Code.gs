@@ -9,13 +9,24 @@
  * Resposta: {"ok":true,"off":<próximo byte>,"recebido":n,"total":n}
  */
 
-const TOKEN = 'TROQUE_ESTE_TOKEN';
+const TOKEN = 'doblo-7f3c9a1e5b2d4f80';
 const RAIZ = 'doblo';        // pasta no Drive
 const VIAGENS = 'viagens';   // subpasta com os arquivos finais
 
 function json(o) {
   return ContentService.createTextOutput(JSON.stringify(o))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// Cria ou substitui: o Drive aceita dois arquivos com o mesmo nome, e uma
+// retentativa do mesmo bloco duplicaria o conte�do.
+function gravaOuAtualiza(pasta, nome, texto) {
+  const it = pasta.getFilesByName(nome);
+  if (it.hasNext()) {
+    it.next().setContent(texto);
+    return;
+  }
+  pasta.createFile(nome, texto, MimeType.PLAIN_TEXT);
 }
 
 function sub(nome, pai) {
@@ -41,7 +52,7 @@ function doPost(e) {
     if (p.token !== TOKEN) return json({ok: false, err: 'token'});
 
     const trip = String(p.trip || '');
-    if (!/^[0-9]{8}-[0-9]{6}\.(csv|bin)$/.test(trip)) {
+    if (!/^(v[0-9]{5}|[0-9]{8}-[0-9]{6})\.(csv|bin)$/.test(trip)) {
       return json({ok: false, err: 'nome'});
     }
 
@@ -56,7 +67,7 @@ function doPost(e) {
     const tmp = sub('_tmp', raiz());
     const pasta = sub(trip, tmp);
     const nome = 'part-' + ('000000000000' + off).slice(-12);
-    pasta.createFile(nome, corpo, MimeType.PLAIN_TEXT);
+    gravaOuAtualiza(pasta, nome, corpo);
 
     // soma o que já chegou
     let recebido = 0;
@@ -74,7 +85,7 @@ function doPost(e) {
       });
       let texto = '';
       for (let i = 0; i < arquivos.length; i++) texto += arquivos[i].getBlob().getDataAsString();
-      sub(VIAGENS, raiz()).createFile(trip, texto, MimeType.PLAIN_TEXT);
+      gravaOuAtualiza(sub(VIAGENS, raiz()), trip, texto);
       pasta.setTrashed(true);
     }
 
